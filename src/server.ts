@@ -1,144 +1,120 @@
 import express from 'express';
 import cors from 'cors';
-import { Endless, EndlessConfig, Network } from '@endlesslab/endless-ts-sdk';
 
 const app = express();
-const PORT = parseInt(process.env.PORT || '10000', 10);
+const PORT = Number(process.env.PORT) || 10000;
 
-// ✅ CORS – اجازه دسترسی به فرانت GitHub Pages
-app.use(
-  cors({
-    origin: 'https://shahrookhpiray1.github.io',
-    methods: ['POST'],
-    allowedHeaders: ['Content-Type'],
-  })
-);
-
+// ✅ CORS آزاد (برای GitHub Pages و تست)
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// ================== Endless setup ==================
-const config = new EndlessConfig({ network: Network.MAINNET });
-const endless = new Endless(config);
+// ====== تنظیمات ======
 
-// ================== Constants ==================
-const POOL_ADDRESSES = {
-  'EDS/USDT':
-    '0x52fe2d47e68de101b84826dce2a09d9d37e2fd2256aa8cda13931ba07cf33082',
-  'USDT/VDEP':
-    '0x947079020ff7a80396813db930dc2731182d7d7601c253a5f44248446287aaac',
+const SLISWAP_API = 'https://www.sliswap.com/api';
+
+// آدرس pool ها (Base58 همونایی که تو داک دیدی)
+const POOLS: Record<string, string> = {
+  'EDS/USDT': '6ayE94veQ41KD4S87piMvxvYhmiEww4fz54wwRaMjBp5',
+  'USDT/VDEP': 'AzSp299Yy9mMEnhGZF4gUaZN19qdgZqcKJ5rTzV6CadR',
 };
 
-const METADATA = {
-  USDT:
-    '0x0707313fc6e87b5bad0bb90b65dbfe13522fde9e71261e91ab76e93fff707934',
-  EDS:
-    '0xc69712057e634bebc9ab02745d2d69ee738e3eb4f5d30189a9acbf8e08fb823e',
-  VDEP:
-    '0x073a178b234acfa232c3c44fd94a32076d4f8a53dba143d99f3bafc84a05620d',
-};
+// ====== توابع ======
 
-const DECIMALS = { USDT: 6, EDS: 8, VDEP: 8 };
-
-// ================== Helpers ==================
-function toAtomic(amount: number, decimals: number): bigint {
-  return BigInt(Math.floor(amount * 10 ** decimals));
-}
-
-function fromAtomic(amount: bigint, decimals: number): number {
-  return Number(amount) / 10 ** decimals;
-}
-
-async function getAmountOut(
-  pool: string,
-  tokenIn: keyof typeof DECIMALS,
-  amount: number
-): Promise<number> {
-  const amountIn = toAtomic(amount, DECIMALS[tokenIn]);
-
-  const res = await endless.view({
-    payload: {
-      function:
-        '0x4198e1871cf459faceccb3d3e86882d7337d17badb0626a33538674385f6e5f4::liquidity_pool::get_amount_out',
-      typeArguments: [],
-      functionArguments: [
-        pool,
-        METADATA[tokenIn],
-        amountIn.toString(),
-      ],
-    },
+async function fetchPoolStats(poolAddress: string) {
+  const res = await fetch(`${SLISWAP_API}/v1/pool/stats`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chain: 2, // Endless
+      poolAddress,
+    }),
   });
 
-  if (!res || !res[0]) throw new Error('Empty response');
+  if (!res.ok) {
+    throw new Error('Failed to fetch pool stats');
+  }
 
-  const outToken =
-    pool === POOL_ADDRESSES['EDS/USDT']
-      ? tokenIn === 'EDS'
-        ? 'USDT'
-        : 'EDS'
-      : tokenIn === 'USDT'
-      ? 'VDEP'
-      : 'USDT';
+  const json = await res.json();
+  if (json.code !== '0') {
+    throw new Error(json.msg || 'API error');
+  }
 
-  return fromAtomic(
-    BigInt(res[0] as string),
-    DECIMALS[outToken as keyof typeof DECIMALS]
-  );
+  return json.data;
 }
 
-// ================== API ==================
+// ====== API ======
+
 app.post('/api/calculate', async (req, res) => {
   try {
     const { from, to, amount } = req.body as {
-      from: keyof typeof DECIMALS;
-      to: keyof typeof DECIMALS;
+      from: string;
+      to: string;
       amount: number;
     };
 
-    if (!from || !to || amount <= 0) {
+    if (!from || !to || typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({ error: 'Invalid input' });
     }
 
-    let actualAmount = 0;
+    const pairKey =
+      POOLS[`${from}/${to}`]
+        ? `${from}/${to}`
+        : POOLS[`${to}/${from}`]
+        ? `${to}/${from}`
+        : null;
 
-    if (
-      (from === 'EDS' && to === 'USDT') ||
-      (from === 'USDT' && to === 'EDS')
-    ) {
-      actualAmount = await getAmountOut(
-        POOL_ADDRESSES['EDS/USDT'],
-        from,
-        amount
-      );
-    } else if (
-      (from === 'USDT' && to === 'VDEP') ||
-      (from === 'VDEP' && to === 'USDT')
-    ) {
-      actualAmount = await getAmountOut(
-        POOL_ADDRESSES['USDT/VDEP'],
-        from,
-        amount
-      );
-    } else {
+    if (!pairKey) {
       return res.status(400).json({ error: 'Unsupported pair' });
     }
 
-    const feePercent = from === 'VDEP' || to === 'VDEP' ? 0.24 : 0.12;
-    const marketExpected = actualAmount / (1 - feePercent / 100);
-    const slippage = marketExpected - actualAmount;
+    const poolAddress = POOLS[pairKey];
+    const stats = await fetchPoolStats(poolAddress);
+
+    const base = stats.baseValue;
+    const quote = stats.quoteValue;
+    const feePercent = Number(stats.fee); // مثلا 0.24
+
+    let reserveIn: number;
+    let reserveOut: number;
+
+    if (from === base.symbol) {
+      reserveIn = Number(base.amount);
+      reserveOut = Number(quote.amount);
+    } else {
+      reserveIn = Number(quote.amount);
+      reserveOut = Number(base.amount);
+    }
+
+    // ===== محاسبات =====
+
+    const marketPrice = reserveOut / reserveIn;
+    const marketExpected = amount * marketPrice;
+
+    const feeRate = feePercent / 100;
+    const amountAfterFee = amount * (1 - feeRate);
+
+    const actualAmount =
+      (amountAfterFee * reserveOut) /
+      (reserveIn + amountAfterFee);
+
+    const loss = marketExpected - actualAmount;
+    const slippagePercent = (loss / marketExpected) * 100;
 
     res.json({
       marketExpected,
+      idealAmount: marketExpected,
       actualAmount,
-      slippage,
-      slippagePercent: (slippage / marketExpected) * 100,
+      totalSlippage: slippagePercent,
+      feeSlippage: feePercent,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error(err);
-    res.status(500).json({ error: 'Calculation failed' });
+    res.status(500).json({ error: err.message || 'Internal error' });
   }
 });
 
-// ================== Start ==================
+// ====== Start ======
+
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Backend running on port ${PORT}`);
+  console.log(`✅ Backend running on port ${PORT}`);
 });
