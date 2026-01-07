@@ -4,21 +4,36 @@ import cors from 'cors';
 const app = express();
 const PORT = Number(process.env.PORT) || 10000;
 
-// ✅ CORS آزاد (برای GitHub Pages و تست)
-app.use(cors({ origin: '*' }));
+// =======================
+// ✅ CORS — کاملاً سازگار با Browser
+// =======================
+app.use(
+  cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type'],
+  })
+);
+
+// 👇 بسیار مهم برای preflight
+app.options('*', cors());
+
 app.use(express.json());
 
-// ====== تنظیمات ======
+// =======================
+// Config
+// =======================
 
 const SLISWAP_API = 'https://www.sliswap.com/api';
 
-// آدرس pool ها (Base58 همونایی که تو داک دیدی)
 const POOLS: Record<string, string> = {
   'EDS/USDT': '6ayE94veQ41KD4S87piMvxvYhmiEww4fz54wwRaMjBp5',
   'USDT/VDEP': 'AzSp299Yy9mMEnhGZF4gUaZN19qdgZqcKJ5rTzV6CadR',
 };
 
-// ====== توابع ======
+// =======================
+// Helpers
+// =======================
 
 async function fetchPoolStats(poolAddress: string) {
   const res = await fetch(`${SLISWAP_API}/v1/pool/stats`, {
@@ -35,14 +50,17 @@ async function fetchPoolStats(poolAddress: string) {
   }
 
   const json = await res.json();
+
   if (json.code !== '0') {
-    throw new Error(json.msg || 'API error');
+    throw new Error(json.msg || 'SliSwap API error');
   }
 
   return json.data;
 }
 
-// ====== API ======
+// =======================
+// API
+// =======================
 
 app.post('/api/calculate', async (req, res) => {
   try {
@@ -72,7 +90,7 @@ app.post('/api/calculate', async (req, res) => {
 
     const base = stats.baseValue;
     const quote = stats.quoteValue;
-    const feePercent = Number(stats.fee); // مثلا 0.24
+    const feePercent = Number(stats.fee); // e.g. 0.24
 
     let reserveIn: number;
     let reserveOut: number;
@@ -85,7 +103,7 @@ app.post('/api/calculate', async (req, res) => {
       reserveOut = Number(base.amount);
     }
 
-    // ===== محاسبات =====
+    // ===== Calculations =====
 
     const marketPrice = reserveOut / reserveIn;
     const marketExpected = amount * marketPrice;
@@ -108,12 +126,14 @@ app.post('/api/calculate', async (req, res) => {
       feeSlippage: feePercent,
     });
   } catch (err: any) {
-    console.error(err);
+    console.error('❌ API Error:', err);
     res.status(500).json({ error: err.message || 'Internal error' });
   }
 });
 
-// ====== Start ======
+// =======================
+// Start Server
+// =======================
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Backend running on port ${PORT}`);
