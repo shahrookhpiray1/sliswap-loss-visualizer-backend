@@ -5,25 +5,20 @@ const app = express();
 const PORT = Number(process.env.PORT) || 10000;
 
 // =======================
-// ✅ CORS — کاملاً سازگار با Browser
+// CORS — کاملاً سازگار با Browser + GitHub Pages
 // =======================
-app.use(
-  cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type'],
-  })
-);
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
+}));
 
-// 👇 بسیار مهم برای preflight
-app.options('*', cors());
-
+app.options('*', (_req, res) => res.sendStatus(200));
 app.use(express.json());
 
 // =======================
 // Config
 // =======================
-
 const SLISWAP_API = 'https://www.sliswap.com/api';
 
 const POOLS: Record<string, string> = {
@@ -34,107 +29,72 @@ const POOLS: Record<string, string> = {
 // =======================
 // Helpers
 // =======================
-
 async function fetchPoolStats(poolAddress: string) {
   const res = await fetch(`${SLISWAP_API}/v1/pool/stats`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chain: 2, // Endless
-      poolAddress,
-    }),
+    body: JSON.stringify({ chain: 2, poolAddress }),
   });
 
-  if (!res.ok) {
-    throw new Error('Failed to fetch pool stats');
-  }
-
   const json = await res.json();
-
-  if (json.code !== '0') {
+  if (!res.ok || json.code !== '0') {
     throw new Error(json.msg || 'SliSwap API error');
   }
-
   return json.data;
 }
 
 // =======================
-// API
+// API (⚠️ بدون /api)
 // =======================
-
-app.post('/api/calculate', async (req, res) => {
+app.post('/calculate', async (req, res) => {
   try {
-    const { from, to, amount } = req.body as {
-      from: string;
-      to: string;
-      amount: number;
-    };
+    const { from, to, amount } = req.body;
 
     if (!from || !to || typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({ error: 'Invalid input' });
     }
 
     const pairKey =
-      POOLS[`${from}/${to}`]
-        ? `${from}/${to}`
-        : POOLS[`${to}/${from}`]
-        ? `${to}/${from}`
-        : null;
+      POOLS[`${from}/${to}`] ? `${from}/${to}` :
+      POOLS[`${to}/${from}`] ? `${to}/${from}` : null;
 
     if (!pairKey) {
       return res.status(400).json({ error: 'Unsupported pair' });
     }
 
-    const poolAddress = POOLS[pairKey];
-    const stats = await fetchPoolStats(poolAddress);
-
+    const stats = await fetchPoolStats(POOLS[pairKey]);
     const base = stats.baseValue;
     const quote = stats.quoteValue;
-    const feePercent = Number(stats.fee); // e.g. 0.24
+    const feePercent = Number(stats.fee);
 
-    let reserveIn: number;
-    let reserveOut: number;
+    const [reserveIn, reserveOut] =
+      from === base.symbol
+        ? [Number(base.amount), Number(quote.amount)]
+        : [Number(quote.amount), Number(base.amount)];
 
-    if (from === base.symbol) {
-      reserveIn = Number(base.amount);
-      reserveOut = Number(quote.amount);
-    } else {
-      reserveIn = Number(quote.amount);
-      reserveOut = Number(base.amount);
-    }
-
-    // ===== Calculations =====
-
-    const marketPrice = reserveOut / reserveIn;
-    const marketExpected = amount * marketPrice;
-
-    const feeRate = feePercent / 100;
-    const amountAfterFee = amount * (1 - feeRate);
+    const marketExpected = amount * (reserveOut / reserveIn);
+    const amountAfterFee = amount * (1 - feePercent / 100);
 
     const actualAmount =
-      (amountAfterFee * reserveOut) /
-      (reserveIn + amountAfterFee);
+      (amountAfterFee * reserveOut) / (reserveIn + amountAfterFee);
 
-    const loss = marketExpected - actualAmount;
-    const slippagePercent = (loss / marketExpected) * 100;
+    const totalSlippage =
+      ((marketExpected - actualAmount) / marketExpected) * 100;
 
     res.json({
       marketExpected,
       idealAmount: marketExpected,
       actualAmount,
-      totalSlippage: slippagePercent,
+      totalSlippage,
       feeSlippage: feePercent,
     });
-  } catch (err: any) {
-    console.error('❌ API Error:', err);
-    res.status(500).json({ error: err.message || 'Internal error' });
+  } catch (e: any) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
   }
 });
 
 // =======================
-// Start Server
-// =======================
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Backend running on port ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () =>
+  console.log(`✅ Backend running on ${PORT}`)
+);
